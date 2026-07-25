@@ -1,0 +1,145 @@
+---
+title: "Homework 2"
+author: "Shruti Oak"
+format: html
+editor: visual
+---
+
+```{r}
+set.seed(1111)
+rm(list = ls())
+
+#install.packages(c("ggraph"))
+
+library(igraph)
+library(ggraph)
+library(ggplot2)
+library(dplyr)
+library(corrplot)
+```
+
+The following code reads in data from my GitHub repo, and displays the summary of actors.
+
+```{r}
+dataGitLink <- "https://github.com/shrutioak06/Shruti_DACSS690C/raw/main/hollywood.graphml"
+
+actors <- read_graph(dataGitLink, format = 'graphml')
+
+V(actors)$wonOscar=ifelse(V(actors)$wonOscar==1,'Yes','No')
+
+summary(actors)
+```
+
+The code below shows the initial finalGraph plot before any of the changes or rules are applied to it (as reference to see the difference after analysis).
+
+```{r}
+finalGraph=ggraph(graph = actors) + 
+  geom_edge_link(aes(edge_width = as.ordered(weight) ),
+                 color='grey70' ) + 
+  geom_node_point() + theme_graph() +
+  geom_node_text(aes(label = name,color = as.factor(wonOscar)),
+                 size=5)
+
+finalGraph + labs(edge_width="Movies in commmon",
+                  color="Won Oscar as actor") 
+```
+
+The next step computes node central measures: eigen_centrality, closeness, betweenness.
+
+```{r}
+eigen=eigen_centrality (actors)$vector
+
+close=closeness(actors,normalized=T)
+
+betw=betweenness(actors,normalized=T)
+
+DFCentrality=as.data.frame(cbind(eigen,close,betw),stringsAsFactors = F)
+names(DFCentrality)=c('Eigenvector','Closeness','Betweenness')
+DFCentrality$person <- V(actors)$name
+
+DFCentrality
+```
+
+Pepares a correlation plot with previous measures. The following results demonstrate that the closeness and betweenness are strongly positively correlated actors who are fewer steps from everyone else. Eigenvector moves in the opposite direction from both, moderately with closeness and weakly with betweenness.
+
+```{r}
+corrPlot <- cor(DFCentrality[, c('Eigenvector', 'Closeness', 'Betweenness')])
+corrplot(corrPlot, method = 'number', type = 'upper')
+```
+
+```{r}
+HubNodes <- dplyr::slice_max(DFCentrality, order_by = Eigenvector, n = 2)$person
+
+V(actors)$label <-ifelse(V(actors)$name %in% HubNodes, V(actors)$name, '')
+
+ggraph(graph = actors) +
+  geom_edge_link(aes(edge_width = as.ordered(weight)), color = 'grey70')+
+  geom_node_point(aes(color = as.factor(wonOscar))) +
+  theme_graph() +
+  geom_node_text(aes(label = label), size = 5, repel = TRUE) +
+  labs(edge_width = "Movies in common", color = "Won Oscar as actor")
+```
+
+The plot above shows how Al Pacino and Robert De Niro have the maximum eigenvector score because both of them are connected to another highly-connected actor, and their closeness is among the lowest in the network. This shows being connected to someone important rather than central to the network.
+
+The code below shows the finalGraph with just the hub nodes.
+
+```{r}
+replicates <- 1000  
+random_transitivities <- replicate(replicates, {
+  RandomNet <- rewire(actors, 
+                      keeping_degseq(niter = gsize(actors) * 10))
+  transitivity(RandomNet, type = "global")
+})
+
+mean_random_transitivities = mean(random_transitivities)
+empirical_transitivity <- transitivity(actors, type = "global")
+sd_random <- sd(random_transitivities)
+
+ratio <- empirical_transitivity / mean_random_transitivities
+z_score <- (empirical_transitivity - mean_random_transitivities) / sd_random
+count_exceeding <- sum(random_transitivities >= empirical_transitivity)
+p_value <- count_exceeding / replicates
+
+report_table <- data.frame(
+  Metric = c("Empirical transitivity", "Random-network mean", "Ratio", "Z-score", "P-value"),
+  Value  = round(c(empirical_transitivity,
+                    mean_random_transitivities,
+                    ratio, z_score, p_value), 4)
+)
+knitr::kable(report_table)
+```
+
+The code below checks for communities.
+
+```{r}
+algos <- list(
+  louvain = { set.seed(123); cluster_louvain(actors) },
+  edge_betweenness = cluster_edge_betweenness(actors)
+)
+
+summary_table <- data.frame(
+  algorithm = names(algos),
+  n_clusters = sapply(algos, length),
+  modularity_Q = sapply(algos, modularity)
+)
+summary_table <- summary_table[order(-summary_table$modularity_Q), ]
+print(summary_table)
+```
+
+The results above demonstrate that there is clustering present, and is roughly twice as high as the average clustering of random networks. However, the results are not reliable because there are only 11 nodes and 14 edges, making the test harder to separate signal from noise.
+
+```{r}
+best_result <- summary_table$algorithm[1]
+memb <- membership(algos[[best_result]])
+actors <- set_vertex_attr(actors, best_result, index = names(memb), value = as.vector(memb))
+
+ggraph(graph = actors) +
+  geom_edge_link(alpha = 0.3) +
+  geom_node_point(aes_string(color = paste0("as.factor(", best_result, ")")), size = 5) +
+  geom_node_text(aes(label = name), repel = TRUE, size = 4) +
+  theme_graph() +
+  labs(color = "Community")
+```
+
+The plot above shows the best results. Edge betweenness (Girvan-Newman) produces the higher score and is plotted below the best result, splitting actors into 2 communities. The graph shows that the community structure is possible, but cannot confirm significant levels given how few nodes the network has.
